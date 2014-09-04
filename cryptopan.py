@@ -16,7 +16,7 @@
 
 from functools import reduce
 from Crypto.Cipher.AES import new as AES
-
+from netaddr import IPAddress
 
 class CryptoPanError(Exception):
 
@@ -35,66 +35,48 @@ class CryptoPan():
         self.aes = AES(key[0:16])
         self.pad = self.aes.encrypt(key[16:32])
 
-        f4 = self.pad[0:4]
-        # Python 2 requires explicit conversion to ints
-        if isinstance(f4, str):
-            f4 = [ord(x) for x in f4]
+        pad_int = sum(ord(c) << (i * 8) for i, c in enumerate(self.pad[::-1]))
 
-        f4bp = self.toint(f4)
-        self.masks = [(mask, f4bp & (~ mask))
-                      for mask in (0xFFFFFFFF >> (32 - p) << (32 - p) for p in range(0, 32))]
+        self.masks = [(mask, pad_int & (~ mask))
+                      for mask in ((2 ** 128 - 1) >> (128 - p) << (128 - p) for p in range(0, 128))]
 
-    def toint(self, array):
-        return array[0] << 24 | array[1] << 16 | array[2] << 8 | array[3]
+    def pack(self, val, num_bytes):
+        return "".join([chr(val >> i * 8 & 0xff) for i in xrange(num_bytes - 1, -1, -1)])
 
-    def toarray(self, n):
-        for i in range(3, -1, -1):
-            yield (n >> (i * 8)) & 0xFF
+    def anonymize(self, ip_in):
+        ip = IPAddress(ip_in)
 
-    def anonymize(self, ip):
-        result = 0
-        address = [int(x) for x in ip.split(".")]
-        if len(address) != 4:
-            raise CryptoPanError("Invalid IPv4 Address")
-
-        address = self.toint(address)
+        if ip.version == 4:
+            address_bytes = 4
+            address = ip.value << (128 - 32)
+        else:
+            address_bytes = 16
+            address = ip.value
 
         def calc(a):
             """ calculate the first bit for Crypto-PAN"""
-            a_array = self.toarray(a)
-
-            # Python 2 requires converting ints to chars one at a time
-            if isinstance(self.pad, str):
-                inp = "".join((chr(x) for x in a_array))
-            else:
-                inp = bytes(a_array)
-
-            inp += self.pad[4:]
-            rin_output = self.aes.encrypt(inp)
-
+            # a is a number, convert to a string
+            rin_input = self.pack(a, 16)
+            rin_output = self.aes.encrypt(rin_input)
             out = rin_output[0]
-            # Python 2 requires explicit conversion to int
-            if isinstance(out, str):
-                out = ord(out)
+            return ord(out) >> 7
 
-            return out >> 7
-
-        addresses = ((address & mask[0]) | mask[1] for mask in self.masks)
+        addresses = ((address & mask[0]) | mask[1] for mask in self.masks[0:address_bytes * 8])
         result = reduce(
-            lambda x,
-            y: x << 1 | y,
+            lambda x, y: x << 1 | y,
             (calc(a) for a in addresses),
             0)
 
-        return ".".join(["%s" % x for x in self.toarray(result ^ address)])
+        return IPAddress(result ^ ip.value)
 
 
 if __name__ == "__main__":
     import time
     c = CryptoPan("".join((chr(x) for x in range(0, 32))))
     print("expected: 2.90.93.17")
-
-    print("calculated: " + c.anonymize("192.0.2.1"))
+    print("calculated: " + str(c.anonymize("192.0.2.1")))
+    print("expected: dd92:2c44:3fc0:ff1e:7ff9:ff:787c:8c58")
+    print("calculated: " + str(c.anonymize("2001:db8::ff00:42:8329")))
     print("starting performance check")
     stime = time.time()
     for i in range(0, 1000):
